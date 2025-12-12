@@ -45,25 +45,54 @@ __all__ = [
 
 
 def downscale_image(w: int, h: int, max_pixels: int | None = 1_000_000) -> tuple[int, int]:
-    """Downscale image dimensions to fit within max pixel count while maintaining aspect ratio.
-
-    Returns even dimensions with minimum 2x2 size.
+    """缩小图像尺寸以适应最大像素数限制，同时保持宽高比。
+    
+    该函数根据指定的最大像素数自动计算缩放后的图像尺寸。它会：
+    1. 保持原始图像的宽高比不变
+    2. 确保返回的尺寸为偶数（某些视频编码器需要）
+    3. 保证最小尺寸为2x2像素
+    
+    Args:
+        w: 原始图像宽度（像素）
+        h: 原始图像高度（像素）
+        max_pixels: 允许的最大像素总数，None表示不限制
+        
+    Returns:
+        缩放后的(宽度, 高度)元组，值均为偶数且不小于2
     """
     s = 1.0 if max_pixels is None or w * h <= max_pixels else sqrt(max_pixels / (w * h))
     nw, nh = int(w * s) // 2 * 2, int(h * s) // 2 * 2
     return max(nw, 2), max(nh, 2)
 
 
-# Content
+# 内容块相关类型定义
 class BinaryContentBlock(BaseModel, ABC):
-    """Base class for binary content (images, video, audio) with MIME type validation."""
+    """二进制内容块基类：用于处理图像、视频、音频等二进制内容，包含MIME类型验证。
+    
+    这是所有二进制内容类型的抽象基类，提供了：
+    1. 自动MIME类型检测（基于文件头部特征）
+    2. 文件扩展名推断
+    3. 内容有效性验证
+    
+    子类必须实现_probe()方法来执行格式特定的验证检查。
+    """
 
-    data: bytes
-    allowed_mime_types: ClassVar[set[str]]
+    data: bytes  # 二进制数据内容
+    allowed_mime_types: ClassVar[set[str]]  # 该内容类型允许的MIME类型集合
 
     @property
     def mime_type(self) -> str:
-        """MIME type for data based on headers."""
+        """基于数据头部检测MIME类型。
+        
+        使用filetype库分析二进制数据的魔术字节（magic bytes）来确定文件类型。
+        这比依赖文件扩展名更可靠，因为它检查实际的文件内容。
+        
+        Returns:
+            检测到的MIME类型字符串（例如："image/png", "video/mp4"）
+            
+        Raises:
+            ValueError: 如果无法识别文件类型
+        """
         match: filetype.Type = filetype.guess(self.data)
         if match is None:
             raise ValueError(f"Unsupported file type {self.data!r}")
@@ -71,7 +100,16 @@ class BinaryContentBlock(BaseModel, ABC):
 
     @property
     def extension(self) -> str:
-        """File extension for the content (e.g., 'png', 'mp4', 'mp3') without leading dot."""
+        """获取内容的文件扩展名（例如：'png', 'mp4', 'mp3'），不包含前导点。
+        
+        基于检测到的MIME类型推断文件扩展名。这对于保存文件或生成文件名很有用。
+        
+        Returns:
+            文件扩展名字符串，不包含'.'前缀
+            
+        Raises:
+            ValueError: 如果MIME类型无法映射到已知的文件扩展名
+        """
         _extension = mimetypes.guess_extension(self.mime_type)
         if _extension is None:
             raise ValueError(f"Unsupported mime_type {self.mime_type!r}")
@@ -79,37 +117,85 @@ class BinaryContentBlock(BaseModel, ABC):
 
     @model_validator(mode="after")
     def _check_mime(self) -> Self:
-        """Validate MIME type against allowed list and verify content is readable."""
+        """验证MIME类型是否在允许列表中，并检查内容是否可读。
+        
+        这是一个Pydantic验证器，在对象创建后自动执行：
+        1. 检查检测到的MIME类型是否在allowed_mime_types集合中
+        2. 调用_probe()方法验证内容格式是否正确
+        
+        Returns:
+            验证通过的对象实例
+            
+        Raises:
+            ValueError: 如果MIME类型不被支持或内容无法解析
+        """
         if self.allowed_mime_types and self.mime_type not in self.allowed_mime_types:
             raise ValueError("Unsupported mime_type {self.mime_type!r}; allowed: {allowed}")
-        self._probe()  # light corruption check; no heavy work
+        self._probe()  # 轻量级损坏检查；不执行重度处理
         return self
 
     @abstractmethod
     def _probe(self) -> None:
-        """Verify content can be opened and read; subclasses implement format-specific checks."""
+        """验证内容是否可以打开和读取；子类实现特定格式的检查。
+        
+        这是一个抽象方法，每个子类必须实现其特定的验证逻辑。
+        例如：
+        - ImageContentBlock使用PIL验证图像
+        - VideoContentBlock使用moviepy验证视频
+        - AudioContentBlock使用moviepy验证音频
+        
+        Raises:
+            应在内容无效时抛出异常
+        """
 
 
 class ImageContentBlock(BinaryContentBlock):
-    """Image content supporting PNG, JPEG, WebP, PSD formats with automatic downscaling."""
+    """图像内容块：支持PNG、JPEG、WebP、PSD等格式，带有自动降采样功能。
+    
+    该类处理各种图像格式，并提供以下功能：
+    1. 自动格式检测和验证
+    2. 图像降采样以控制像素数（节省API成本和带宽）
+    3. 转换为base64编码的data URL用于LLM输入
+    
+    支持的格式包括：JPEG、PNG、GIF、BMP、TIFF、PSD
+    """
 
     kind: Literal["image_content_block"] = "image_content_block"
     allowed_mime_types: ClassVar[set[str]] = {
-        "image/jpeg",  # JPEG
-        "image/png",  # PNG
-        "image/gif",  # GIF
-        "image/bmp",  # BMP
-        "image/tiff",  # TIFF
-        "image/vnd.adobe.photoshop",  # PSD
+        "image/jpeg",  # JPEG格式 - 有损压缩，适合照片
+        "image/png",  # PNG格式 - 无损压缩，支持透明度
+        "image/gif",  # GIF格式 - 支持动画和透明度
+        "image/bmp",  # BMP格式 - Windows位图格式
+        "image/tiff",  # TIFF格式 - 高质量图像格式
+        "image/vnd.adobe.photoshop",  # PSD格式 - Adobe Photoshop文件
     }
 
     def _probe(self) -> None:
-        """Verify image data is valid by attempting to open and verify it with PIL."""
+        """使用PIL尝试打开和验证图像数据的有效性。
+        
+        这个方法会：
+        1. 将二进制数据加载到PIL Image对象中
+        2. 调用verify()方法检查图像完整性
+        3. 如果图像损坏或格式无效，会抛出异常
+        """
         with Image.open(BytesIO(self.data)) as im:
             im.verify()
 
     def to_base64_url(self, max_pixels: int | None = RESOLUTION_1MP) -> str:
-        """Convert image to base64 data URL, optionally resizing to max pixel count."""
+        """将图像转换为base64数据URL，可选择调整大小到最大像素数。
+        
+        该方法执行以下操作：
+        1. 如果图像超过max_pixels限制，则降采样到指定大小
+        2. 转换为RGB模式（如果不是）以确保兼容性
+        3. 保存为PNG格式（无损且广泛支持）
+        4. 编码为base64并生成data URL格式
+        
+        Args:
+            max_pixels: 最大像素数限制，None表示不限制大小
+            
+        Returns:
+            格式为 "data:image/png;base64,..." 的base64编码图像URL
+        """
         img: Image.Image = Image.open(BytesIO(self.data))
         if max_pixels is not None and img.width * img.height > max_pixels:
             tw, th = downscale_image(img.width, img.height, max_pixels)
@@ -122,23 +208,40 @@ class ImageContentBlock(BinaryContentBlock):
 
 
 class VideoContentBlock(BinaryContentBlock):
-    """MP4 video content with automatic transcoding and resolution downscaling."""
+    """视频内容块：支持MP4等格式，带有自动转码和分辨率降采样功能。
+    
+    该类处理各种视频格式，提供以下核心功能：
+    1. 多种视频格式的自动检测和验证
+    2. 视频转码为标准MP4格式（H.264编码）
+    3. 分辨率降采样以控制文件大小和处理成本
+    4. 帧率调整和音频处理
+    
+    支持的输入格式：AVI、MP4、MOV、MKV、WMV、FLV、MPEG、WebM、GIF（动画）
+    输出格式：标准MP4（H.264视频 + AAC音频）
+    """
 
     kind: Literal["video_content_block"] = "video_content_block"
     allowed_mime_types: ClassVar[set[str]] = {
-        "video/x-msvideo",  # AVI
-        "video/mp4",  # MP4
-        "video/quicktime",  # MOV
-        "video/x-matroska",  # MKV
-        "video/x-ms-wmv",  # WMV
-        "video/x-flv",  # FLV
-        "video/mpeg",  # MPEG
-        "video/webm",  # WebM
-        "video/gif",  # GIF (animated)
+        "video/x-msvideo",  # AVI格式 - 微软视频格式
+        "video/mp4",  # MP4格式 - 最广泛支持的现代视频格式
+        "video/quicktime",  # MOV格式 - Apple QuickTime格式
+        "video/x-matroska",  # MKV格式 - 开源容器格式
+        "video/x-ms-wmv",  # WMV格式 - Windows Media Video
+        "video/x-flv",  # FLV格式 - Flash Video
+        "video/mpeg",  # MPEG格式 - 传统MPEG视频
+        "video/webm",  # WebM格式 - Web优化格式
+        "video/gif",  # GIF格式 - 动画GIF
     }
 
     def _probe(self) -> None:
-        """Verify video data is valid by attempting to open it as a VideoFileClip."""
+        """通过尝试将其打开为VideoFileClip来验证视频数据的有效性。
+        
+        该方法会：
+        1. 将二进制数据写入临时文件（moviepy需要文件路径）
+        2. 使用moviepy加载视频以验证格式
+        3. 检查视频是否可以成功打开和解析
+        4. 抑制moviepy的警告信息以保持日志清洁
+        """
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=UserWarning, module="moviepy.*")
         with NamedTemporaryFile(suffix=".bin") as f:
@@ -148,7 +251,22 @@ class VideoContentBlock(BinaryContentBlock):
             clip.close()
 
     def to_base64_url(self, max_pixels: int | None = RESOLUTION_480P, fps: int | None = None) -> str:
-        """Transcode to MP4 and return base64 data URL."""
+        """将视频转码为MP4并返回base64数据URL。
+        
+        执行完整的视频处理流程：
+        1. 如果分辨率超过max_pixels，降采样视频尺寸
+        2. 应用H.264视频编码（广泛兼容）
+        3. 如果原视频有音频，使用AAC编码处理音频
+        4. 可选择调整帧率以进一步减小文件大小
+        5. 编码为base64格式的data URL
+        
+        Args:
+            max_pixels: 最大像素数限制（默认480p），用于控制视频分辨率
+            fps: 可选的目标帧率，None表示保持原始帧率
+            
+        Returns:
+            格式为 "data:video/mp4;base64,..." 的base64编码视频URL
+        """
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=UserWarning, module="moviepy.*")
             with NamedTemporaryFile(suffix=".mp4") as fin, NamedTemporaryFile(suffix=".mp4") as fout:
@@ -172,27 +290,44 @@ class VideoContentBlock(BinaryContentBlock):
 
 
 class AudioContentBlock(BinaryContentBlock):
-    """Audio content supporting MPEG, WAV, AAC, and other common audio formats."""
+    """音频内容块：支持MPEG、WAV、AAC等常见音频格式。
+    
+    该类处理各种音频格式，提供以下功能：
+    1. 多种音频格式的自动检测和验证
+    2. 音频转码为标准MP3格式
+    3. 比特率控制以平衡质量和文件大小
+    4. 转换为base64编码用于LLM输入
+    
+    支持的格式：AAC、FLAC、MP3、M4A、MPEG、OGG、PCM、WAV、WebM等
+    输出格式：MP3（libmp3lame编码）
+    """
 
     kind: Literal["audio_content_block"] = "audio_content_block"
     allowed_mime_types: ClassVar[set[str]] = {
-        "audio/x-aac",
-        "audio/flac",
-        "audio/mp3",
-        "audio/m4a",
-        "audio/mpeg",
-        "audio/mpga",
-        "audio/mp4",
-        "audio/ogg",
-        "audio/pcm",
-        "audio/wav",
-        "audio/webm",
-        "audio/x-wav",
-        "audio/aac",
+        "audio/x-aac",  # AAC格式 - 高级音频编码
+        "audio/flac",  # FLAC格式 - 无损音频压缩
+        "audio/mp3",  # MP3格式 - 最常用的音频格式
+        "audio/m4a",  # M4A格式 - Apple音频格式
+        "audio/mpeg",  # MPEG音频
+        "audio/mpga",  # MPEG音频（另一种MIME类型）
+        "audio/mp4",  # MP4音频
+        "audio/ogg",  # OGG格式 - 开源音频格式
+        "audio/pcm",  # PCM格式 - 未压缩音频
+        "audio/wav",  # WAV格式 - Windows波形音频
+        "audio/webm",  # WebM音频
+        "audio/x-wav",  # WAV格式（另一种MIME类型）
+        "audio/aac",  # AAC格式（另一种MIME类型）
     }
 
     def _probe(self) -> None:
-        """Verify audio data is valid by attempting to open it as an AudioFileClip."""
+        """通过尝试将其打开为AudioFileClip来验证音频数据的有效性。
+        
+        验证过程：
+        1. 将音频数据写入临时文件
+        2. 使用moviepy的AudioFileClip加载音频
+        3. 验证音频是否可以成功解析
+        4. 抑制警告信息以保持输出清洁
+        """
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=UserWarning, module="moviepy.*")
         with NamedTemporaryFile(suffix=".bin") as fin:
@@ -202,7 +337,20 @@ class AudioContentBlock(BinaryContentBlock):
             clip.close()
 
     def to_base64_url(self, bitrate: str = "192k") -> str:
-        """Transcode to MP3 and return base64 data URL."""
+        """将音频转码为MP3并返回base64数据URL。
+        
+        音频处理流程：
+        1. 使用libmp3lame编码器转码为MP3格式
+        2. 应用指定的比特率（默认192kbps，良好的质量/大小平衡）
+        3. 编码为base64格式的data URL
+        
+        Args:
+            bitrate: 目标音频比特率（如"128k"、"192k"、"320k"）
+                    更高的比特率 = 更好的质量但文件更大
+            
+        Returns:
+            格式为 "data:audio/mpeg;base64,..." 的base64编码音频URL
+        """
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=UserWarning, module="moviepy.*")
             with NamedTemporaryFile(suffix=".bin") as fin, NamedTemporaryFile(suffix=".mp3") as fout:
@@ -215,22 +363,44 @@ class AudioContentBlock(BinaryContentBlock):
 
 
 type ContentBlock = ImageContentBlock | VideoContentBlock | AudioContentBlock | str
-"""Union of all content block types (image, video, audio, or text)."""
+"""内容块类型联合：图像、视频、音频或纯文本的联合类型。
+
+这个类型定义允许消息内容包含多种媒体类型，实现真正的多模态对话。
+"""
 
 type Content = list[ContentBlock] | str
-"""Message content: either a plain string or list of mixed content blocks."""
+"""消息内容类型：可以是纯字符串，也可以是混合内容块的列表。
+
+示例：
+- 纯文本："Hello, world!"
+- 混合内容：["这是一张图片:", ImageContentBlock(...), "这是视频:", VideoContentBlock(...)]
+"""
 
 
-# Metadata Protocol and Aggregation
+# 元数据协议和聚合
 @runtime_checkable
 class Addable(Protocol):
-    """Protocol for types that support aggregation via __add__."""
+    """可加性协议：定义支持通过__add__进行聚合的类型。
+    
+    实现此协议的类型可以使用+运算符进行组合，这对于聚合多次工具调用的元数据非常有用。
+    例如：TokenUsage、ToolUseCountMetadata等都实现了此协议。
+    """
 
     def __add__(self, other: Self) -> Self: ...
 
 
 def _aggregate_list[T: Addable](metadata_list: list[T]) -> T | None:
-    """Aggregate a list of metadata using __add__."""
+    """使用__add__方法聚合元数据列表。
+    
+    该函数将列表中的所有元数据对象组合成单个聚合对象。
+    这对于统计工具使用情况、token消耗等非常有用。
+    
+    Args:
+        metadata_list: 要聚合的元数据对象列表
+        
+    Returns:
+        聚合后的元数据对象，如果列表为空则返回None
+    """
     if not metadata_list:
         return None
     aggregated = metadata_list[0]

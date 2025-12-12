@@ -1,7 +1,21 @@
-"""Custom exceptions for agent framework."""
+"""代理框架的自定义异常类定义。
+
+该模块定义了框架中使用的特定异常类型，用于处理代理执行过程中的各种错误情况。
+通过自定义异常，可以更精确地识别和处理不同类型的错误。
+"""
 
 __all__ = ["ContextOverflowError"]
 
 
 class ContextOverflowError(Exception):
-    """Raised when LLM context window is exceeded (max_tokens or length finish_reason)."""
+    """上下文窗口溢出异常。
+    
+    当LLM的上下文窗口超出限制时抛出此异常。这通常发生在以下情况：
+    1. 输入tokens总数超过模型的max_tokens限制
+    2. LLM返回的finish_reason指示长度限制已达到
+    
+    捕获此异常后，应用程序可以采取补救措施，例如：
+    - 触发上下文摘要压缩
+    - 清除部分历史消息
+    - 终止当前任务并报告错误
+    """
