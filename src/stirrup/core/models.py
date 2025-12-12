@@ -410,37 +410,61 @@ def _aggregate_list[T: Addable](metadata_list: list[T]) -> T | None:
 
 
 def to_json_serializable(value: object) -> object:
-    # None and JSON primitives
+    """将Python对象转换为JSON可序列化的格式。
+    
+    该函数处理各种Python类型，将它们转换为可以安全序列化为JSON的格式。
+    这对于保存元数据、日志记录和API响应非常重要。
+    
+    处理的类型包括：
+    - 基本类型：None、str、int、bool
+    - 浮点数：处理NaN和Infinity的特殊情况
+    - Pydantic模型：使用model_dump转换
+    - 日期/时间：转换为ISO格式字符串
+    - 集合类型：dict、list、tuple、set等
+    
+    Args:
+        value: 要序列化的Python对象
+        
+    Returns:
+        JSON可序列化的对象（dict、list、str、int、float、bool或None）
+        
+    Raises:
+        ValueError: 如果遇到NaN或Infinity浮点值
+        TypeError: 如果遇到不支持的类型
+    """
+    # None和JSON基本类型可以直接使用
     if value is None or isinstance(value, str | int | bool):
         return value
 
-    # Floats need special handling for nan/inf
+    # 浮点数需要特殊处理NaN和无穷大
     if isinstance(value, float):
         if isnan(value) or isinf(value):
             raise ValueError(f"Cannot serialize {value} to JSON")
         return value
 
-    # Pydantic models
+    # Pydantic模型转换为字典
     if isinstance(value, BaseModel):
         return value.model_dump(mode="json")
 
-    # Common non-serializable types
+    # 常见的不可序列化类型转换
     if isinstance(value, datetime | date | time):
-        return value.isoformat()
+        return value.isoformat()  # 转换为ISO 8601格式字符串
 
     if isinstance(value, timedelta):
-        return value.total_seconds()
+        return value.total_seconds()  # 转换为秒数
 
     if isinstance(value, Decimal):
-        return float(value)
+        return float(value)  # 高精度数字转换为浮点数
 
+    # 递归处理字典
     if isinstance(value, dict):
         return {k: to_json_serializable(v) for k, v in value.items()}
 
+    # 递归处理列表和其他序列类型
     if isinstance(value, list | tuple | set | frozenset):
         return [to_json_serializable(v) for v in value]
 
-    # We have not implemented other cases (e.g. Bytes, Enum, etc.)
+    # 未实现其他情况（如Bytes、Enum等）
     raise TypeError(f"Cannot serialize {type(value).__name__} to JSON: {value!r}")
 
 
@@ -457,22 +481,25 @@ def aggregate_metadata(
 
 
 def _collect_all_token_usage(result: dict) -> "TokenUsage":
-    """Recursively collect all token_usage from a flattened aggregate_metadata result.
-
+    """递归收集扁平化aggregate_metadata结果中的所有token使用量。
+    
+    该函数遍历聚合元数据字典，查找并累加所有的token使用量，
+    包括直接的token_usage和嵌套子代理的token_usage。
+    
     Args:
-        result: The flattened dict from aggregate_metadata (before JSON serialization)
-
+        result: aggregate_metadata返回的扁平化字典（JSON序列化之前）
+    
     Returns:
-        Combined TokenUsage from all entries (direct and nested sub-agents)
+        组合所有条目（直接和嵌套子代理）的TokenUsage总和
     """
     total = TokenUsage()
 
     for key, value in result.items():
         if key == "token_usage" and isinstance(value, TokenUsage):
-            # Direct token_usage at this level
+            # 当前层级的直接token使用量
             total = total + value
         elif isinstance(value, dict):
-            # This could be a sub-agent's tool dict - check for nested token_usage
+            # 这可能是子代理的工具字典 - 检查嵌套的token_usage
             nested_token_usage = value.get("token_usage")
             if isinstance(nested_token_usage, TokenUsage):
                 total = total + nested_token_usage
@@ -483,81 +510,92 @@ def _collect_all_token_usage(result: dict) -> "TokenUsage":
 def aggregate_metadata(
     metadata_dict: dict[str, list[Any]], prefix: str = "", return_json_serializable: bool = True
 ) -> dict | object:
-    """Aggregate metadata lists and flatten sub-agents into a single-level dict with hierarchical keys.
-
-    For entries with nested run_metadata (e.g., SubAgentMetadata), flattens sub-agents using dot notation.
-    Each sub-agent's value is a dict mapping its direct tool names to their aggregated metadata
-    (excluding nested sub-agent data, which gets its own top-level key).
-
-    At the root level, token_usage is rolled up to include all sub-agent token usage.
-
+    """聚合元数据列表并将子代理扁平化为带有层次键的单级字典。
+    
+    对于具有嵌套run_metadata的条目（如SubAgentMetadata），使用点表示法扁平化子代理。
+    每个子代理的值是一个字典，将其直接工具名称映射到聚合的元数据
+    （不包括嵌套的子代理数据，它们有自己的顶级键）。
+    
+    在根级别，token_usage被汇总以包括所有子代理的token使用量。
+    
     Args:
-        metadata_dict: Dict mapping names (tools or agents) to lists of metadata instances
-        prefix: Key prefix for nested calls (used internally for recursion)
-
+        metadata_dict: 将名称（工具或代理）映射到元数据实例列表的字典
+        prefix: 嵌套调用的键前缀（内部递归使用）
+        return_json_serializable: 是否将结果转换为JSON可序列化格式
+    
     Returns:
-        Flat dict with dot-notation keys for sub-agents.
-        Example: {
-            "token_usage": <combined from all agents>,
-            "web_browsing_sub_agent": {"web_search": <aggregated>, "token_usage": <aggregated>},
-            "web_browsing_sub_agent.web_fetch_sub_agent": {"fetch_web_page": <aggregated>, "token_usage": <aggregated>}
+        扁平化字典，使用点表示法表示子代理。
+        示例: {
+            "token_usage": <所有代理的组合>,
+            "web_browsing_sub_agent": {"web_search": <聚合>, "token_usage": <聚合>},
+            "web_browsing_sub_agent.web_fetch_sub_agent": {"fetch_web_page": <聚合>, "token_usage": <聚合>}
         }
     """
+
     result: dict = {}
 
-    # First pass: aggregate all entries in this level
+    # 第一遍：聚合当前层级的所有条目
     aggregated_level: dict = {}
     for name, metadata_list in metadata_dict.items():
         if not metadata_list:
             continue
         aggregated_level[name] = _aggregate_list(metadata_list)
 
-    # Second pass: separate nested sub-agents from direct tools, and recurse
+    # 第二遍：将嵌套的子代理与直接工具分开，并递归处理
     direct_tools: dict = {}
     for name, aggregated in aggregated_level.items():
         if hasattr(aggregated, "run_metadata") and isinstance(aggregated.run_metadata, dict):
-            # This is a sub-agent - recurse into it
+            # 这是一个子代理 - 递归进入它
             full_key = f"{prefix}.{name}" if prefix else name
             nested = aggregate_metadata(aggregated.run_metadata, prefix=full_key, return_json_serializable=False)
             result.update(nested)
         else:
-            # This is a direct tool/metadata - keep it at this level
+            # 这是直接工具/元数据 - 保留在当前层级
             direct_tools[name] = aggregated
 
-    # Store direct tools under the current prefix
+    # 将直接工具存储在当前前缀下
     if prefix:
         result[prefix] = direct_tools
     else:
-        # At root level, merge direct tools into result
+        # 在根层级，将直接工具合并到result中
         result.update(direct_tools)
 
-    # At root level, roll up all token_usage from sub-agents
+    # 在根层级，汇总所有子代理的token_usage
     if not prefix:
         total_token_usage = _collect_all_token_usage(result)
         if total_token_usage.total > 0:
             result["token_usage"] = [total_token_usage]
 
     if return_json_serializable:
-        # Convert all Pydantic models to JSON-serializable dicts
+        # 将所有Pydantic模型转换为JSON可序列化的字典
         return to_json_serializable(result)
     return result
 
 
-# Messages
+# 消息相关类
 class TokenUsage(BaseModel):
-    """Token counts for LLM usage (input, output, reasoning tokens)."""
+    """LLM使用的token计数（输入、输出、推理tokens）。
+    
+    跟踪LLM API调用中的token消耗，用于：
+    1. 成本计算（不同类型的token可能有不同价格）
+    2. 上下文窗口管理（确保不超过模型限制）
+    3. 性能分析（了解哪里消耗了最多tokens）
+    """
 
-    input: int = 0
-    output: int = 0
-    reasoning: int = 0
+    input: int = 0  # 输入tokens数量（提示和上下文）
+    output: int = 0  # 输出tokens数量（模型生成的响应）
+    reasoning: int = 0  # 推理tokens数量（某些模型如o1系列使用）
 
     @property
     def total(self) -> int:
-        """Total token count across input, output, and reasoning."""
+        """跨输入、输出和推理的总token计数。"""
         return self.input + self.output + self.reasoning
 
     def __add__(self, other: "TokenUsage") -> "TokenUsage":
-        """Add two TokenUsage objects together, summing each field independently."""
+        """将两个TokenUsage对象相加，独立地对每个字段求和。
+        
+        这允许轻松累积多次API调用的token使用量。
+        """
         return TokenUsage(
             input=self.input + other.input,
             output=self.output + other.output,
@@ -566,40 +604,45 @@ class TokenUsage(BaseModel):
 
 
 class ToolUseCountMetadata(BaseModel):
-    """Generic metadata tracking tool usage count.
-
-    Implements Addable protocol for aggregation. Use this for tools that only need
-    to track how many times they were called.
+    """通用元数据，用于跟踪工具使用次数。
+    
+    实现Addable协议以支持聚合。对于只需要跟踪调用次数的工具，使用此类。
+    许多简单工具使用此元数据类型而不是定义自定义元数据。
     """
 
-    num_uses: int = 1
+    num_uses: int = 1  # 工具被使用的次数
 
     def __add__(self, other: "ToolUseCountMetadata") -> "ToolUseCountMetadata":
+        """组合两次工具使用的元数据，累加使用次数。"""
         return ToolUseCountMetadata(num_uses=self.num_uses + other.num_uses)
 
 
 class ToolResult[M](BaseModel):
-    """Result from a tool executor with optional metadata.
-
-    Generic over metadata type M. M should implement Addable protocol for aggregation support,
-    but this is not enforced at the class level due to Pydantic schema generation limitations.
+    """工具执行器的结果，包含可选的元数据。
+    
+    泛型类型参数M表示元数据类型。M应该实现Addable协议以支持聚合，
+    但由于Pydantic模式生成的限制，这不在类级别强制执行。
+    
+    工具执行器返回此类型，包含：
+    - content: 工具执行的实际输出（可以是文本、图像等）
+    - metadata: 关于执行的可选元数据（如使用次数、性能指标等）
     """
 
-    content: Content
-    metadata: M | None = None
+    content: Content  # 工具的输出内容
+    metadata: M | None = None  # 可选的元数据
 
 
 class Tool[P: BaseModel, M](BaseModel):
-    """Tool definition with name, description, parameter schema, and executor function.
-
-    Generic over:
-        P: Parameter model type (must be a Pydantic BaseModel, or None for parameterless tools)
-        M: Metadata type (should implement Addable for aggregation; use None for tools without metadata)
-
-    Tools are simple, stateless callables. For tools requiring lifecycle management
-    (setup/teardown, resource pooling), use a ToolProvider instead.
-
-    Example with parameters:
+    """工具定义：包含名称、描述、参数模式和执行函数。
+    
+    泛型类型参数：
+        P: 参数模型类型（必须是Pydantic BaseModel，或None表示无参数工具）
+        M: 元数据类型（应实现Addable以支持聚合；对于没有元数据的工具使用None）
+    
+    工具是简单的、无状态的可调用对象。对于需要生命周期管理的工具
+    （设置/清理、资源池化），请改用ToolProvider。
+    
+    带参数的示例：
         ```python
         class CalcParams(BaseModel):
             expression: str
@@ -611,8 +654,8 @@ class Tool[P: BaseModel, M](BaseModel):
             executor=lambda p: ToolResult(content=str(eval(p.expression))),
         )
         ```
-
-    Example without parameters:
+    
+    无参数的示例：
         ```python
         time_tool = Tool[None, None](
             name="time",
@@ -622,42 +665,41 @@ class Tool[P: BaseModel, M](BaseModel):
         ```
     """
 
-    name: str
-    description: str
-    parameters: type[P] | None = None
-    executor: Callable[[P], ToolResult[M] | Awaitable[ToolResult[M]]]
+    name: str  # 工具名称（必须唯一）
+    description: str  # 工具描述（LLM看到此描述以决定何时使用该工具）
+    parameters: type[P] | None = None  # 参数模式（Pydantic模型类）
+    executor: Callable[[P], ToolResult[M] | Awaitable[ToolResult[M]]]  # 执行函数（同步或异步）
 
 
 class ToolProvider(ABC):
-    """Abstract base class for tool providers with lifecycle management.
-
-    ToolProviders manage resources (HTTP clients, sandboxes, server connections)
-    and return Tool instances when entering their async context. They implement
-    the async context manager protocol.
-
-    Use ToolProvider for:
-    - Tools requiring setup/teardown (connections, temp directories)
-    - Tools that return multiple Tool instances (e.g., MCP servers)
-    - Tools with shared state across calls (e.g., HTTP client pooling)
-
-    Example:
+    """工具提供者抽象基类：带有生命周期管理。
+    
+    ToolProvider管理资源（HTTP客户端、沙箱、服务器连接）并在进入其异步上下文时
+    返回Tool实例。它们实现异步上下文管理器协议。
+    
+    使用ToolProvider的场景：
+    - 需要设置/清理的工具（连接、临时目录）
+    - 返回多个Tool实例的工具（例如MCP服务器）
+    - 跨调用共享状态的工具（例如HTTP客户端池）
+    
+    示例：
         class MyToolProvider(ToolProvider):
             async def __aenter__(self) -> Tool | list[Tool]:
-                # Setup resources and return tool(s)
+                # 设置资源并返回工具
                 return self._create_tool()
 
-            # __aexit__ is optional - default is no-op
-
-    Agent automatically manages ToolProvider lifecycle via its session() context.
+            # __aexit__是可选的 - 默认为无操作
+    
+    Agent通过其session()上下文自动管理ToolProvider生命周期。
     """
 
     @abstractmethod
     async def __aenter__(self) -> "Tool | list[Tool]":
-        """Enter async context: setup resources and return tool(s).
-
+        """进入异步上下文：设置资源并返回工具。
+        
         Returns:
-            A single Tool instance, or a list of Tool instances for providers
-            that expose multiple tools (e.g., MCP servers).
+            单个Tool实例，或对于暴露多个工具的提供者（例如MCP服务器）
+            返回Tool实例列表。
         """
         ...
 
@@ -667,100 +709,164 @@ class ToolProvider(ABC):
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> None:
-        """Exit async context: cleanup resources. Default: no-op."""
+        """退出异步上下文：清理资源。默认为无操作。
+        
+        子类可以重写此方法来实现自定义清理逻辑，例如：
+        - 关闭网络连接
+        - 删除临时文件
+        - 释放系统资源
+        """
 
 
 @runtime_checkable
 class LLMClient(Protocol):
-    """Protocol defining the interface for LLM client implementations.
-
-    Any LLM client must implement this protocol to work with the Agent class.
-    Provides text generation with tool support and model capability inspection.
+    """定义LLM客户端实现的接口协议。
+    
+    任何LLM客户端都必须实现此协议才能与Agent类一起工作。
+    提供带工具支持的文本生成和模型能力检查。
+    
+    实现此协议的示例：
+    - ChatCompletionsClient（OpenAI兼容API）
+    - LiteLLMClient（多提供商支持）
     """
 
     @abstractmethod
-    async def generate(self, messages: list["ChatMessage"], tools: dict[str, Tool]) -> "AssistantMessage": ...
+    async def generate(self, messages: list["ChatMessage"], tools: dict[str, Tool]) -> "AssistantMessage":
+        """生成LLM响应。
+        
+        Args:
+            messages: 对话历史消息列表
+            tools: 可用工具字典（名称 -> Tool对象）
+            
+        Returns:
+            LLM生成的助手消息，可能包含工具调用
+        """
+        ...
 
     @property
-    def model_slug(self) -> str: ...
+    def model_slug(self) -> str:
+        """模型标识符字符串（例如："gpt-4"、"claude-3-opus"）。"""
+        ...
 
     @property
-    def max_tokens(self) -> int: ...
+    def max_tokens(self) -> int:
+        """模型的最大上下文窗口大小（以tokens计）。"""
+        ...
 
 
 class ToolCall(BaseModel):
-    """Represents a tool invocation request from the LLM.
-
+    """表示来自LLM的工具调用请求。
+    
+    当LLM决定使用工具时，它会生成一个或多个ToolCall对象。
+    每个ToolCall包含工具名称、参数和唯一ID用于跟踪。
+    
     Attributes:
-        name: Name of the tool to invoke
-        arguments: JSON string containing tool parameters
-        tool_call_id: Unique identifier for tracking this tool call and its result
+        name: 要调用的工具名称
+        arguments: 包含工具参数的JSON字符串
+        tool_call_id: 用于跟踪此工具调用及其结果的唯一标识符
     """
 
-    name: str
-    arguments: str
-    tool_call_id: str | None = None
+    name: str  # 工具名称
+    arguments: str  # JSON格式的参数
+    tool_call_id: str | None = None  # 唯一调用ID
 
 
 class SystemMessage(BaseModel):
-    """System-level instructions and context for the LLM."""
+    """系统级指令和上下文消息。
+    
+    系统消息通常包含对LLM的高级指令、角色定义、约束条件等。
+    它设定了对话的基调和规则。
+    """
 
     role: Literal["system"] = "system"
-    content: Content
+    content: Content  # 系统指令内容
 
 
 class UserMessage(BaseModel):
-    """User input message to the LLM."""
+    """用户输入消息。
+    
+    表示来自用户的输入，可以是纯文本，也可以包含图像、视频等多模态内容。
+    """
 
     role: Literal["user"] = "user"
-    content: Content
+    content: Content  # 用户输入内容
 
 
 class Reasoning(BaseModel):
-    """Extended thinking/reasoning content from models that support chain-of-thought reasoning."""
+    """扩展思考/推理内容，来自支持思维链推理的模型。
+    
+    某些模型（如OpenAI的o1系列）会生成推理过程，显示它们如何得出答案。
+    此类捕获该推理内容和可选的签名。
+    """
 
-    signature: str | None = None
-    content: str
+    signature: str | None = None  # 可选的推理签名
+    content: str  # 推理过程内容
 
 
 class AssistantMessage(BaseModel):
-    """LLM response message with optional tool calls and token usage tracking."""
+    """LLM响应消息，包含可选的工具调用和token使用跟踪。
+    
+    这是LLM生成的响应，可能包含：
+    - 文本内容（回答、解释等）
+    - 工具调用请求（如果LLM决定使用工具）
+    - 推理过程（对于支持的模型）
+    - Token使用统计
+    """
 
     role: Literal["assistant"] = "assistant"
-    reasoning: Reasoning | None = None
-    content: Content
-    tool_calls: Annotated[list[ToolCall], Field(default_factory=list)]
-    token_usage: Annotated[TokenUsage, Field(default_factory=TokenUsage)]
+    reasoning: Reasoning | None = None  # 可选的推理过程
+    content: Content  # 响应内容
+    tool_calls: Annotated[list[ToolCall], Field(default_factory=list)]  # 工具调用列表
+    token_usage: Annotated[TokenUsage, Field(default_factory=TokenUsage)]  # Token使用统计
 
 
 class ToolMessage(BaseModel):
-    """Tool execution result returned to the LLM."""
+    """工具执行结果，返回给LLM。
+    
+    在工具执行后，结果被包装在ToolMessage中并添加到对话历史，
+    让LLM可以看到工具执行的结果并据此继续对话。
+    """
 
     role: Literal["tool"] = "tool"
-    content: Content
-    tool_call_id: str | None = None
-    name: str | None = None
-    args_was_valid: bool = True
+    content: Content  # 工具执行结果
+    tool_call_id: str | None = None  # 对应的工具调用ID
+    name: str | None = None  # 工具名称
+    args_was_valid: bool = True  # 参数是否有效
 
 
 type ChatMessage = Annotated[SystemMessage | UserMessage | AssistantMessage | ToolMessage, Field(discriminator="role")]
-"""Discriminated union of all message types, automatically parsed based on role field."""
+"""聊天消息类型的判别联合，根据role字段自动解析。
+
+Pydantic会根据role字段自动选择正确的消息类型：
+- "system" -> SystemMessage
+- "user" -> UserMessage  
+- "assistant" -> AssistantMessage
+- "tool" -> ToolMessage
+"""
 
 
 class SubAgentMetadata(BaseModel):
-    """Metadata from sub-agent execution including token usage, message history, and child run metadata.
-
-    Implements Addable protocol to support aggregation across multiple subagent calls.
+    """子代理执行的元数据，包括token使用、消息历史和子运行元数据。
+    
+    当使用子代理（通过Agent.to_tool()创建）时，此元数据捕获子代理的完整执行信息。
+    实现Addable协议以支持跨多次子代理调用的聚合。
     """
 
-    message_history: list[list[ChatMessage]]
-    run_metadata: Annotated[dict[str, list[Any]], Field(default_factory=dict)]
+    message_history: list[list[ChatMessage]]  # 子代理的消息历史
+    run_metadata: Annotated[dict[str, list[Any]], Field(default_factory=dict)]  # 子代理的运行元数据
 
     def __add__(self, other: "SubAgentMetadata") -> "SubAgentMetadata":
-        """Combine metadata from multiple subagent calls."""
-        # Concatenate message histories
+        """组合来自多次子代理调用的元数据。
+        
+        将两个SubAgentMetadata实例合并：
+        1. 串联消息历史（保持执行顺序）
+        2. 合并运行元数据（每个键的列表拼接）
+        
+        这允许跟踪同一子代理的多次调用的累积信息。
+        """
+        # 串联消息历史
         combined_history = self.message_history + other.message_history
-        # Merge run metadata (concatenate lists per key)
+        # 合并运行元数据（每个键拼接列表）
         combined_meta: dict[str, list[Any]] = dict(self.run_metadata)
         for key, metadata_list in other.run_metadata.items():
             if key in combined_meta:
