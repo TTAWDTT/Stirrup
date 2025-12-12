@@ -1,14 +1,20 @@
-# Tool naming
+# 工具命名常量
+# 定义完成工具的标准名称，该工具用于标记任务已完成
 FINISH_TOOL_NAME = "finish"
 
-# Agent execution limits
-AGENT_MAX_TURNS = 30  # Maximum agent turns before forced termination
-CONTEXT_SUMMARIZATION_CUTOFF = 0.7  # Context window usage threshold (0.0-1.0) that triggers message summarization
+# 代理执行限制配置
+# 最大回合数限制：代理在强制终止前可以执行的最大对话回合数，防止无限循环
+AGENT_MAX_TURNS = 30  # 默认30个回合，超过此数值代理将被强制停止
+# 上下文摘要触发阈值：当上下文窗口使用率达到此比例时，触发消息摘要压缩以节省tokens
+CONTEXT_SUMMARIZATION_CUTOFF = 0.7  # 0.7 表示当使用70%的上下文窗口时触发摘要，范围0.0-1.0
 
-# Media resolution limits
-RESOLUTION_1MP = 1_000_000  # 1 megapixel - default max resolution for images
-RESOLUTION_480P = 640 * 480  # 480p video resolution
+# 媒体文件分辨率限制
+# 这些常量定义了图像和视频处理时的最大分辨率，用于控制资源消耗和API调用成本
+RESOLUTION_1MP = 1_000_000  # 1百万像素 - 图像处理的默认最大分辨率，适用于大多数LLM视觉API
+RESOLUTION_480P = 640 * 480  # 标准480p视频分辨率（307,200像素），用于视频帧提取和处理
 
-# Code execution
-SUBMISSION_SANDBOX_TIMEOUT = 60 * 10  # 10 minutes
+# 代码执行环境配置
+# 沙箱执行超时时间：代码执行的最大允许时间，防止无限循环或长时间运行的进程
+SUBMISSION_SANDBOX_TIMEOUT = 60 * 10  # 600秒（10分钟）的超时限制
+# E2B沙箱模板别名：用于E2B远程代码执行环境的模板标识符
 E2B_SANDBOX_TEMPLATE_ALIAS = "e2b-sandbox"

@@ -1,4 +1,4 @@
-# Context var for passing parent depth to sub-agent executors
+# 用于将父级深度传递给子代理执行器的上下文变量
 import contextvars
 import glob as glob_module
 import inspect
@@ -42,6 +42,7 @@ from stirrup.tools.code_backends.local import LocalCodeExecToolProvider
 from stirrup.tools.finish import SIMPLE_FINISH_TOOL
 from stirrup.utils.logging import AgentLogger, AgentLoggerBase
 
+# 用于存储父级深度的上下文变量，默认值为0（表示根代理）
 _PARENT_DEPTH: contextvars.ContextVar[int] = contextvars.ContextVar("parent_depth", default=0)
 
 logger = logging.getLogger(__name__)
@@ -49,29 +50,30 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class SessionState:
-    """Per-session state for resource lifecycle management.
-
-    Kept minimal - only contains resources that need async lifecycle management
-    (exit_stack, exec_env) and session-specific configuration (output_dir).
-
-    Tool availability is managed via Agent._active_tools (instance-scoped),
-    and run results are stored on the agent instance temporarily.
-
-    For subagent file transfer:
-    - parent_exec_env: Reference to the parent's exec env (for cross-env transfers)
-    - depth: Agent depth (0 = root, >0 = subagent)
-    - output_dir: For root agent, this is a local filesystem path. For subagents,
-      this is a path within the parent's exec env.
+    """每个会话的状态，用于资源生命周期管理。
+    
+    保持最小化 - 仅包含需要异步生命周期管理的资源（exit_stack、exec_env）
+    和会话特定配置（output_dir）。
+    
+    工具可用性通过Agent._active_tools管理（实例作用域），
+    运行结果临时存储在代理实例上。
+    
+    子代理文件传输：
+    - parent_exec_env: 对父级执行环境的引用（用于跨环境传输）
+    - depth: 代理深度（0 = 根代理，>0 = 子代理）
+    - output_dir: 对于根代理，这是本地文件系统路径。对于子代理，
+      这是父级执行环境中的路径。
     """
 
-    exit_stack: AsyncExitStack
-    exec_env: CodeExecToolProvider | None = None
-    output_dir: str | None = None  # String path (contextual: local for root, in parent env for subagent)
-    parent_exec_env: CodeExecToolProvider | None = None
-    depth: int = 0
-    uploaded_file_paths: list[str] = field(default_factory=list)  # Paths of files uploaded to exec_env
+    exit_stack: AsyncExitStack  # 异步上下文管理器栈，用于管理资源清理
+    exec_env: CodeExecToolProvider | None = None  # 代码执行环境（如果配置了）
+    output_dir: str | None = None  # 输出目录路径（上下文相关：根级为本地路径，子代理为父环境中的路径）
+    parent_exec_env: CodeExecToolProvider | None = None  # 父级执行环境（用于子代理）
+    depth: int = 0  # 代理层级深度
+    uploaded_file_paths: list[str] = field(default_factory=list)  # 上传到exec_env的文件路径列表
 
 
+# 会话状态的上下文变量，每个会话有独立的状态
 _SESSION_STATE: contextvars.ContextVar[SessionState] = contextvars.ContextVar("session_state")
 
 __all__ = [
@@ -83,16 +85,35 @@ LOGGER = logging.getLogger(__name__)
 
 
 def _num_turns_remaining_msg(number_of_turns_remaining: int) -> UserMessage:
-    """Create a user message warning the agent about remaining turns before max_turns is reached."""
+    """创建用户消息，警告代理在达到max_turns之前还剩余的回合数。
+    
+    当接近最大回合数限制时，此函数生成提醒消息让代理知道需要尽快完成任务。
+    
+    Args:
+        number_of_turns_remaining: 剩余回合数
+        
+    Returns:
+        包含剩余回合数提醒的UserMessage
+    """
     if number_of_turns_remaining == 1:
-        return UserMessage(content="This is the last turn. Please finish the task by calling the finish tool.")
+        return UserMessage(content="这是最后一个回合。请通过调用finish工具来完成任务。")
     return UserMessage(
-        content=f"You have {number_of_turns_remaining} turns remaining to complete the task. Please continue. Remember you will need a separate turn to finish the task.",
+        content=f"你还有{number_of_turns_remaining}个回合来完成任务。请继续。记住你需要一个单独的回合来完成任务。",
     )
 
 
 def _handle_text_only_tool_responses(tool_messages: list[ToolMessage]) -> tuple[list[ToolMessage], list[UserMessage]]:
-    """Extract image blocks from tool messages and convert them to user messages for text-only models."""
+    """从工具消息中提取图像块，并将它们转换为用户消息（用于纯文本模型）。
+    
+    某些LLM模型不支持工具响应中的图像。此函数将图像内容提取为单独的用户消息，
+    以便这些模型也能"看到"图像。
+    
+    Args:
+        tool_messages: 工具执行结果消息列表
+        
+    Returns:
+        修改后的工具消息列表和新创建的用户消息列表
+    """
     user_messages: list[UserMessage] = []
     for tm in tool_messages:
         if isinstance(tm.content, list):
@@ -111,11 +132,16 @@ def _handle_text_only_tool_responses(tool_messages: list[ToolMessage]) -> tuple[
 
 
 def _get_total_token_usage(messages: list[list[ChatMessage]]) -> TokenUsage:
-    """Aggregate token usage across all assistant messages in grouped conversation history.
-
+    """聚合分组对话历史中所有助手消息的token使用量。
+    
+    遍历所有消息组，提取并累加AssistantMessage中的token_usage。
+    这提供了整个对话会话的总token消耗统计。
+    
     Args:
-        messages: List of message groups, where each group represents a segment of conversation.
-
+        messages: 消息组列表，每组表示一段对话
+        
+    Returns:
+        累加的TokenUsage对象
     """
     return sum(
         [msg.token_usage for msg in chain.from_iterable(messages) if isinstance(msg, AssistantMessage)],
@@ -124,43 +150,55 @@ def _get_total_token_usage(messages: list[list[ChatMessage]]) -> TokenUsage:
 
 
 class SubAgentParams(BaseModel):
-    """Parameters for sub-agent tool invocation."""
+    """子代理工具调用的参数。
+    
+    当一个代理被转换为工具（通过Agent.to_tool()）后，父代理可以调用它。
+    此类定义调用子代理时需要的参数。
+    """
 
-    task: Annotated[str, Field(description="The task/prompt for the sub-agent to complete")]
+    task: Annotated[str, Field(description="子代理要完成的任务/提示")]
     input_files: Annotated[
         list[str],
         Field(
             default_factory=list,
-            description="List of file paths to upload to the sub-agent's execution environment. "
-            "Use paths from output_dir (e.g., files saved by previous sub-agents).",
+            description="要上传到子代理执行环境的文件路径列表。"
+            "使用output_dir中的路径（例如，之前子代理保存的文件）。",
         ),
     ]
 
 
-DEFAULT_SUB_AGENT_DESCRIPTION = "A sub agent that can be used to handle a contained, specific task."
+# 默认子代理描述，用于to_tool()
+DEFAULT_SUB_AGENT_DESCRIPTION = "一个子代理，可用于处理特定的、独立的任务。"
 
-# Agent name validation pattern: alphanumeric, underscores, hyphens, 1-128 chars
+# 代理名称验证模式：字母数字、下划线、连字符，1-128个字符
 AGENT_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{1,128}$")
 
 
 class Agent[FinishParams: BaseModel, FinishMeta]:
-    """Agent that executes tool-using loops with automatic context management.
-
-    Runs up to max_turns iterations of: LLM generation → tool execution → message accumulation.
-    When conversation history exceeds context window limits, older messages are automatically
-    condensed into a summary to preserve working memory.
-
-    The Agent can be used as an async context manager via .session() for automatic tool
-    lifecycle management, logging, and file saving:
-
+    """执行工具使用循环的代理，带有自动上下文管理功能。
+    
+    运行最多max_turns次迭代：LLM生成 → 工具执行 → 消息累积。
+    当对话历史超过上下文窗口限制时，旧消息会自动压缩为摘要以保留工作记忆。
+    
+    Agent可以通过.session()作为异步上下文管理器使用，以实现自动工具
+    生命周期管理、日志记录和文件保存：
+    
+    示例：
         from stirrup.clients.chat_completions_client import ChatCompletionsClient
 
-        # Create client and agent
+        # 创建客户端和代理
         client = ChatCompletionsClient(model="gpt-5")
         agent = Agent(client=client, name="assistant")
 
         async with agent.session(output_dir="./output") as session:
             finish_params, history, metadata = await session.run("Your task here")
+    
+    关键特性：
+    - 自动上下文管理：当接近token限制时自动摘要历史
+    - 工具生命周期管理：通过session()自动设置和清理工具资源
+    - 多模态支持：处理文本、图像、视频、音频内容
+    - 子代理支持：可将代理转换为工具供其他代理调用
+    - 灵活的finish工具：自定义任务完成的参数和元数据类型
     """
 
     def __init__(
@@ -179,79 +217,88 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         # Logging
         logger: AgentLoggerBase | None = None,
     ) -> None:
-        """Initialize the agent with an LLM client and configuration.
-
+        """使用LLM客户端和配置初始化代理。
+        
         Args:
-            client: LLM client for generating responses. Use ChatCompletionsClient for
-                    OpenAI/OpenAI-compatible APIs, or LiteLLMClient for other providers.
-            name: Name of the agent (used for logging purposes)
-            max_turns: Maximum number of turns before stopping
-            system_prompt: System prompt to prepend to all runs (when using string prompts)
-            tools: List of Tools and/or ToolProviders available to the agent.
-                   If None, uses DEFAULT_TOOLS. ToolProviders are automatically
-                   set up and torn down by Agent.session().
-                   Use [*DEFAULT_TOOLS, extra_tool] to extend defaults.
-            finish_tool: Tool used to signal task completion. Defaults to SIMPLE_FINISH_TOOL.
-            context_summarization_cutoff: Fraction of context window (0-1) at which to trigger summarization
-            run_sync_in_thread: Execute synchronous tool executors in a separate thread
-            text_only_tool_responses: Extract images from tool responses as separate user messages
-            logger: Optional logger instance. If None, creates AgentLogger() internally.
-
+            client: 用于生成响应的LLM客户端。使用ChatCompletionsClient for
+                    OpenAI/OpenAI兼容的API，或使用LiteLLMClient支持其他提供商。
+            name: 代理名称（用于日志记录目的）。必须符合模式：
+                  字母数字、下划线、连字符，1-128个字符。
+            max_turns: 停止前的最大回合数。默认30。
+            system_prompt: 附加到所有运行的系统提示（使用字符串提示时）。
+                          自动添加基础系统提示，包括max_turns和输入文件信息。
+            tools: 代理可用的Tool和/或ToolProvider列表。
+                   如果为None，使用DEFAULT_TOOLS（代码执行+网页工具）。
+                   ToolProvider由Agent.session()自动设置和清理。
+                   使用[*DEFAULT_TOOLS, extra_tool]来扩展默认工具。
+            finish_tool: 用于标记任务完成的工具。默认为SIMPLE_FINISH_TOOL。
+                        可以自定义以添加特定的完成参数和元数据。
+            context_summarization_cutoff: 触发摘要的上下文窗口使用比例（0-1）。
+                                         默认0.7表示使用70%时触发摘要。
+            run_sync_in_thread: 在单独线程中执行同步工具执行器。默认True。
+                               这防止同步工具阻塞异步事件循环。
+            text_only_tool_responses: 将工具响应中的图像提取为单独的用户消息。
+                                     默认True。某些模型不支持工具响应中的图像。
+            logger: 可选的日志记录器实例。如果为None，内部创建AgentLogger()。
+                   可以传入自定义日志记录器以控制输出格式和目标。
+        
+        Raises:
+            ValueError: 如果代理名称无效（不符合AGENT_NAME_PATTERN）
         """
-        # Validate agent name
+        # 验证代理名称格式
         if not AGENT_NAME_PATTERN.match(name):
             raise ValueError(
-                f"Invalid agent name '{name}'. "
-                "Agent names must match pattern '^[a-zA-Z0-9_-]{1,128}$' "
-                "(alphanumeric, underscores, hyphens only, 1-128 characters)."
+                f"无效的代理名称'{name}'。"
+                "代理名称必须符合模式'^[a-zA-Z0-9_-]{{1,128}}$'"
+                "（仅字母数字、下划线、连字符，1-128个字符）。"
             )
 
-        self._client: LLMClient = client
-        self._name = name
-        self._max_turns = max_turns
-        self._system_prompt = system_prompt
-        self._tools = tools if tools is not None else DEFAULT_TOOLS
-        self._finish_tool: Tool = finish_tool if finish_tool is not None else SIMPLE_FINISH_TOOL
-        self._context_summarization_cutoff = context_summarization_cutoff
-        self._run_sync_in_thread = run_sync_in_thread
-        self._text_only_tool_responses = text_only_tool_responses
+        self._client: LLMClient = client  # LLM客户端
+        self._name = name  # 代理名称
+        self._max_turns = max_turns  # 最大回合数
+        self._system_prompt = system_prompt  # 用户自定义系统提示
+        self._tools = tools if tools is not None else DEFAULT_TOOLS  # 工具列表
+        self._finish_tool: Tool = finish_tool if finish_tool is not None else SIMPLE_FINISH_TOOL  # 完成工具
+        self._context_summarization_cutoff = context_summarization_cutoff  # 上下文摘要阈值
+        self._run_sync_in_thread = run_sync_in_thread  # 是否在线程中运行同步工具
+        self._text_only_tool_responses = text_only_tool_responses  # 是否提取图像为用户消息
 
-        # Logger (can be passed in or created here)
+        # 日志记录器（可以传入或在此创建）
         self._logger: AgentLoggerBase = logger if logger is not None else AgentLogger()
 
-        # Session configuration (set during session(), used in __aenter__)
-        self._pending_output_dir: Path | None = None
-        self._pending_input_files: str | Path | list[str | Path] | None = None
+        # 会话配置（在session()期间设置，在__aenter__中使用）
+        self._pending_output_dir: Path | None = None  # 待处理的输出目录
+        self._pending_input_files: str | Path | list[str | Path] | None = None  # 待处理的输入文件
 
-        # Instance-scoped state (populated during __aenter__, isolated per agent instance)
-        self._active_tools: dict[str, Tool] = {}
-        self._last_finish_params: Any = None  # FinishParams type parameter
-        self._last_run_metadata: dict[str, list[Any]] = {}
-        self._transferred_paths: list[str] = []  # Paths transferred to parent (for subagents)
+        # 实例作用域状态（在__aenter__期间填充，每个代理实例隔离）
+        self._active_tools: dict[str, Tool] = {}  # 当前活动的工具
+        self._last_finish_params: Any = None  # FinishParams类型参数
+        self._last_run_metadata: dict[str, list[Any]] = {}  # 最后一次运行的元数据
+        self._transferred_paths: list[str] = []  # 传输到父级的路径（用于子代理）
 
     @property
     def name(self) -> str:
-        """The name of this agent."""
+        """此代理的名称。"""
         return self._name
 
     @property
     def client(self) -> LLMClient:
-        """The LLM client used by this agent."""
+        """此代理使用的LLM客户端。"""
         return self._client
 
     @property
     def tools(self) -> dict[str, Tool]:
-        """Currently active tools (available after entering session context)."""
+        """当前活动的工具（进入会话上下文后可用）。"""
         return self._active_tools
 
     @property
     def finish_tool(self) -> Tool:
-        """The finish tool used to signal task completion."""
+        """用于标记任务完成的finish工具。"""
         return self._finish_tool
 
     @property
     def logger(self) -> AgentLoggerBase:
-        """The logger instance used by this agent."""
+        """此代理使用的日志记录器实例。"""
         return self._logger
 
     def session(
@@ -259,29 +306,35 @@ class Agent[FinishParams: BaseModel, FinishMeta]:
         output_dir: Path | str | None = None,
         input_files: str | Path | list[str | Path] | None = None,
     ) -> Self:
-        """Configure a session and return self for use as async context manager.
-
+        """配置会话并返回self用作异步上下文管理器。
+        
+        会话提供：
+        1. 自动工具生命周期管理（设置和清理ToolProvider）
+        2. 文件管理（上传输入文件、保存输出文件）
+        3. 日志记录设置
+        4. 资源清理
+        
         Args:
-            output_dir: Directory to save output files from finish_params.paths
-            input_files: Files to upload to the execution environment at session start.
-                        Accepts a single path or list of paths. Supports:
-                        - File paths (str or Path)
-                        - Directory paths (uploaded recursively)
-                        - Glob patterns (e.g., "data/*.csv", "**/*.py")
-                        Raises ValueError if no CodeExecToolProvider is configured
-                        or if a glob pattern matches no files.
-
+            output_dir: 用于保存finish_params.paths中输出文件的目录。
+                       如果未提供，文件将不会保存到磁盘。
+            input_files: 在会话开始时上传到执行环境的文件。
+                        接受单个路径或路径列表。支持：
+                        - 文件路径（str或Path）
+                        - 目录路径（递归上传）
+                        - Glob模式（例如"data/*.csv"、"**/*.py"）
+                        如果未配置CodeExecToolProvider或glob模式不匹配任何文件，
+                        会引发ValueError。
+        
         Returns:
-            Self, for use with `async with agent.session(...) as session:`
-
+            Self，用于`async with agent.session(...) as session:`
+        
         Example:
             async with agent.session(output_dir="./output", input_files="data/*.csv") as session:
                 result = await session.run("Analyze the CSV files")
-
+        
         Note:
-            Multiple concurrent sessions from the same Agent instance are supported.
-            Each session maintains isolated state via ContextVar.
-
+            支持来自同一Agent实例的多个并发会话。
+            每个会话通过ContextVar维护隔离的状态。
         """
         self._pending_output_dir = Path(output_dir) if output_dir else None
         self._pending_input_files = input_files

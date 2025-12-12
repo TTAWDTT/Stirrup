@@ -1,20 +1,23 @@
-"""Web tools for fetching pages and searching the web.
+"""网页工具：用于获取网页和搜索网络。
 
-This module provides web_fetch and web_search tools with a WebToolProvider
-class that manages the shared HTTP client lifecycle.
+该模块提供web_fetch和web_search工具，通过WebToolProvider类管理共享的HTTP客户端生命周期。
 
-Example usage:
+主要功能：
+- web_fetch: 获取网页并提取主要内容为Markdown格式
+- web_search: 使用Brave Search API搜索网络
+
+使用示例：
     from stirrup.clients.chat_completions_client import ChatCompletionsClient
 
-    # As part of DEFAULT_TOOLS in Agent
+    # 作为Agent中DEFAULT_TOOLS的一部分使用
     client = ChatCompletionsClient(model="gpt-5")
     agent = Agent(
         client=client,
         name="assistant",
-        tools=DEFAULT_TOOLS,  # Includes WebToolProvider
+        tools=DEFAULT_TOOLS,  # 包含WebToolProvider
     )
 
-    # Standalone usage
+    # 独立使用
     async with WebToolProvider() as provider:
         tools = provider.get_tools()
 """
@@ -34,10 +37,10 @@ from stirrup.utils.text import truncate_msg
 
 __all__ = ["WebToolProvider"]
 
-# Constants
-MAX_LENGTH_WEB_FETCH_HTML = 40000
-MAX_LENGTH_WEB_SEARCH_RESULTS = 40000
-DEFAULT_WEBFETCH_HEADERS = {
+# 常量配置
+MAX_LENGTH_WEB_FETCH_HTML = 40000  # 网页获取结果的最大长度（字符数）
+MAX_LENGTH_WEB_SEARCH_RESULTS = 40000  # 搜索结果的最大长度（字符数）
+DEFAULT_WEBFETCH_HEADERS = {  # 默认HTTP请求头，模拟浏览器行为
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -48,31 +51,33 @@ DEFAULT_WEBFETCH_HEADERS = {
     "Accept-Encoding": "gzip, deflate",
     "Connection": "keep-alive",
 }
-WEB_FETCH_TIMEOUT = 60 * 3
-WEB_SEARCH_TIMEOUT = 60 * 3
+WEB_FETCH_TIMEOUT = 60 * 3  # 网页获取超时时间：3分钟（180秒）
+WEB_SEARCH_TIMEOUT = 60 * 3  # 网页搜索超时时间：3分钟（180秒）
 
 
 # =============================================================================
-# Web Fetch Tool
+# 网页获取工具
 # =============================================================================
 
 
 class FetchWebPageParams(BaseModel):
-    """Parameters for web page fetch tool."""
+    """网页获取工具的参数模型。"""
 
-    url: Annotated[str, Field(description="Full HTTP or HTTPS URL of the web page to fetch and extract")]
+    url: Annotated[str, Field(description="要获取和提取的网页的完整HTTP或HTTPS URL地址")]
 
 
 class WebFetchMetadata(BaseModel):
-    """Metadata for web fetch tool tracking URLs fetched.
-
-    Implements Addable protocol for aggregation across multiple fetches.
+    """网页获取工具的元数据，跟踪已获取的URL。
+    
+    实现Addable协议，支持跨多次获取的聚合。
+    可用于统计访问了哪些页面、访问次数等。
     """
 
-    num_uses: int = 1
-    pages_fetched: list[str] = Field(default_factory=list)
+    num_uses: int = 1  # 工具使用次数
+    pages_fetched: list[str] = Field(default_factory=list)  # 已获取的页面URL列表
 
     def __add__(self, other: "WebFetchMetadata") -> "WebFetchMetadata":
+        """组合多次网页获取的元数据。"""
         return WebFetchMetadata(
             num_uses=self.num_uses + other.num_uses,
             pages_fetched=self.pages_fetched + other.pages_fetched,
@@ -80,13 +85,16 @@ class WebFetchMetadata(BaseModel):
 
 
 def _get_fetch_web_page_tool(client: httpx.AsyncClient | None = None) -> Tool[FetchWebPageParams, WebFetchMetadata]:
-    """Create a web page fetching tool that extracts main content as markdown.
-
+    """创建网页获取工具，将主要内容提取为Markdown格式。
+    
+    该工具使用trafilatura库智能提取网页的主要内容，过滤掉导航、广告等无关信息。
+    提取的内容以Markdown格式返回，便于LLM理解和处理。
+    
     Args:
-        client: Optional shared httpx.AsyncClient for connection pooling
-
+        client: 可选的共享httpx.AsyncClient用于连接池化，提高性能
+    
     Returns:
-        Tool configured to fetch web pages and extract clean markdown content
+        配置好的Tool对象，可获取网页并提取干净的Markdown内容
     """
 
     @retry(
@@ -96,15 +104,27 @@ def _get_fetch_web_page_tool(client: httpx.AsyncClient | None = None) -> Tool[Fe
         reraise=True,
     )
     async def _fetch(url: str, http_client: httpx.AsyncClient) -> httpx.Response:
-        """Execute HTTP GET request with automatic retries on network errors."""
+        """执行HTTP GET请求，网络错误时自动重试。
+        
+        使用指数退避策略重试，最多3次尝试。
+        这提高了网络不稳定时的可靠性。
+        """
         response = await http_client.get(url, headers=DEFAULT_WEBFETCH_HEADERS)
         response.raise_for_status()
         return response
 
     async def fetch_web_page_executor(params: FetchWebPageParams) -> ToolResult[WebFetchMetadata]:
-        """Fetch web page and extract main content as markdown using trafilatura."""
+        """获取网页并使用trafilatura提取主要内容为Markdown。
+        
+        工作流程：
+        1. 发送HTTP GET请求获取网页HTML
+        2. 使用trafilatura智能提取主要内容
+        3. 转换为Markdown格式
+        4. 截断过长内容以适应token限制
+        5. 返回XML格式的结果，包含URL和内容/错误
+        """
         try:
-            # Use provided client or create temporary one for backward compatibility
+            # 使用提供的客户端或创建临时客户端（向后兼容）
             if client is not None:
                 response = await _fetch(params.url, client)
             else:
@@ -115,6 +135,7 @@ def _get_fetch_web_page_tool(client: httpx.AsyncClient | None = None) -> Tool[Fe
                 ) as temp_client:
                     response = await _fetch(params.url, temp_client)
 
+            # 使用trafilatura提取主要内容并转换为Markdown
             body_md = trafilatura.extract(response.text, output_format="markdown") or ""
             return ToolResult(
                 content=f"<web_fetch><url>{params.url}</url><body>"
@@ -122,6 +143,7 @@ def _get_fetch_web_page_tool(client: httpx.AsyncClient | None = None) -> Tool[Fe
                 metadata=WebFetchMetadata(pages_fetched=[params.url]),
             )
         except httpx.HTTPError as exc:
+            # HTTP错误（404、500等）也返回结构化响应
             return ToolResult(
                 content=f"<web_fetch><url>{params.url}</url><error>"
                 f"{truncate_msg(str(exc), MAX_LENGTH_WEB_FETCH_HTML)}</error></web_fetch>",
@@ -130,35 +152,37 @@ def _get_fetch_web_page_tool(client: httpx.AsyncClient | None = None) -> Tool[Fe
 
     return Tool[FetchWebPageParams, WebFetchMetadata](
         name="fetch_web_page",
-        description="Fetch and extract the main content from a web page as markdown. Returns body text or error as XML.",
+        description="从网页获取并提取主要内容为Markdown格式。返回正文文本或错误信息，格式为XML。",
         parameters=FetchWebPageParams,
         executor=fetch_web_page_executor,  # ty: ignore[invalid-argument-type]
     )
 
 
 # =============================================================================
-# Web Search Tool
+# 网页搜索工具
 # =============================================================================
 
 
 class WebSearchParams(BaseModel):
-    """Parameters for web search tool."""
+    """网页搜索工具的参数模型。"""
 
     query: Annotated[
-        str, Field(description="Natural language search query for Brave Search (similar to Google search syntax)")
+        str, Field(description="Brave Search的自然语言搜索查询（语法类似Google搜索）")
     ]
 
 
 class WebSearchMetadata(BaseModel):
-    """Metadata for web search tool tracking search results.
-
-    Implements Addable protocol for aggregation across multiple searches.
+    """网页搜索工具的元数据，跟踪搜索结果。
+    
+    实现Addable协议，支持跨多次搜索的聚合。
+    用于统计搜索次数和返回的结果总数。
     """
 
-    num_uses: int = 1
-    pages_returned: int = 0
+    num_uses: int = 1  # 搜索次数
+    pages_returned: int = 0  # 返回的页面数量
 
     def __add__(self, other: "WebSearchMetadata") -> "WebSearchMetadata":
+        """组合多次搜索的元数据。"""
         return WebSearchMetadata(
             num_uses=self.num_uses + other.num_uses,
             pages_returned=self.pages_returned + other.pages_returned,
@@ -168,23 +192,26 @@ class WebSearchMetadata(BaseModel):
 def _get_websearch_tool(
     brave_api_key: str | None, client: httpx.AsyncClient | None = None
 ) -> Tool[WebSearchParams, WebSearchMetadata]:
-    """Create a web search tool using Brave Search API.
-
+    """创建使用Brave Search API的网页搜索工具。
+    
+    Brave Search提供快速、隐私友好的网页搜索服务。
+    需要API密钥才能使用（可从Brave Search API网站获取）。
+    
     Args:
-        brave_api_key: Brave Search API key, or None to use BRAVE_API_KEY environment variable
-        client: Optional shared httpx.AsyncClient for connection pooling
-
+        brave_api_key: Brave Search API密钥，或None则使用BRAVE_API_KEY环境变量
+        client: 可选的共享httpx.AsyncClient用于连接池化
+    
     Returns:
-        Tool configured to search the web and return top 5 results as XML
-
+        配置好的Tool对象，可搜索网络并返回前5个结果为XML格式
+    
     Raises:
-        RuntimeError: If no API key is provided or found in environment
+        RuntimeError: 如果未提供API密钥且环境变量中也未找到
     """
     if brave_api_key is None:
         brave_api_key = os.getenv("BRAVE_API_KEY")
 
     if brave_api_key is None:
-        raise RuntimeError("No Brave Search API key provided.")
+        raise RuntimeError("未提供Brave Search API密钥。")
 
     @retry(
         retry=retry_if_exception_type((httpx.TimeoutException, httpx.NetworkError)),
@@ -193,21 +220,35 @@ def _get_websearch_tool(
         reraise=True,
     )
     async def _search(query: str, http_client: httpx.AsyncClient) -> dict:
-        """Execute Brave Search API request with automatic retries on network errors."""
+        """执行Brave Search API请求，网络错误时自动重试。
+        
+        使用指数退避策略，最多3次尝试。
+        """
         response = await http_client.get(
             "https://api.search.brave.com/res/v1/web/search",
             headers={
                 "X-Subscription-Token": brave_api_key,
                 "Accept": "application/json",
             },
-            params={"q": query, "count": 5},
+            params={"q": query, "count": 5},  # 返回前5个搜索结果
         )
         response.raise_for_status()
         return response.json()
 
     async def websearch_executor(params: WebSearchParams) -> ToolResult[WebSearchMetadata]:
-        """Execute web search and format results as XML with title, URL, and description."""
-        # Use provided client or create temporary one for backward compatibility
+        """执行网页搜索并将结果格式化为XML，包含标题、URL和描述。
+        
+        返回格式：
+        <results>
+          <result>
+            <title>页面标题</title>
+            <url>页面URL</url>
+            <description>页面描述</description>
+          </result>
+          ...
+        </results>
+        """
+        # 使用提供的客户端或创建临时客户端
         if client is not None:
             data = await _search(params.query, client)
         else:
@@ -215,6 +256,7 @@ def _get_websearch_tool(
                 data = await _search(params.query, temp_client)
 
         results = data.get("web", {}).get("results", [])
+        # 构建XML格式的搜索结果，转义特殊字符防止XML注入
         results_xml = (
             "<results>\n"
             + "\n".join(
@@ -237,25 +279,31 @@ def _get_websearch_tool(
 
     return Tool[WebSearchParams, WebSearchMetadata](
         name="web_search",
-        description="Search the web using Brave Search API. Returns top 5 results with title, URL, and description as XML.",
+        description="使用Brave Search API搜索网络。返回前5个结果，包含标题、URL和描述，格式为XML。",
         parameters=WebSearchParams,
         executor=websearch_executor,  # ty: ignore[invalid-argument-type]
     )
 
 
 # =============================================================================
-# WebToolProvider
+# WebToolProvider - 网页工具提供者
 # =============================================================================
 
 
 class WebToolProvider(ToolProvider):
-    """Provides web tools (web_fetch, web_search) with managed HTTP client lifecycle.
-
-    WebToolProvider implements the Tool lifecycle protocol (has_lifecycle=True),
-    so it can be used directly in Agent's tools list. It creates an httpx.AsyncClient
-    on __aenter__ and returns the web tools.
-
-    Usage as Tool in Agent (preferred):
+    """提供网页工具（web_fetch、web_search），带有托管的HTTP客户端生命周期。
+    
+    WebToolProvider实现Tool生命周期协议（has_lifecycle=True），
+    因此可以直接在Agent的tools列表中使用。它在__aenter__时创建httpx.AsyncClient
+    并返回网页工具。
+    
+    特性：
+    - 自动HTTP客户端管理（连接池、超时控制）
+    - 可选的Brave Search集成（需要API密钥）
+    - 自动重试机制处理网络错误
+    - 智能内容提取（使用trafilatura）
+    
+    在Agent中作为Tool使用（推荐）：
         from stirrup.clients.chat_completions_client import ChatCompletionsClient
 
         client = ChatCompletionsClient(model="gpt-5")
@@ -266,9 +314,9 @@ class WebToolProvider(ToolProvider):
         )
 
         async with agent.session(output_dir="./output") as session:
-            await session.run("Search the web and fetch a page")
+            await session.run("搜索网络并获取页面")
 
-    Standalone usage:
+    独立使用：
         async with WebToolProvider() as provider:
             tools = provider.get_tools()
     """
@@ -279,23 +327,29 @@ class WebToolProvider(ToolProvider):
         timeout: float = 60 * 3,
         brave_api_key: str | None = None,
     ) -> None:
-        """Initialize WebToolProvider.
-
+        """初始化WebToolProvider。
+        
         Args:
-            timeout: HTTP timeout in seconds (default: 180)
-            brave_api_key: Brave Search API key for web_search tool.
-                          If None, uses BRAVE_API_KEY environment variable.
-                          Web search is only available if API key is provided.
+            timeout: HTTP超时时间（秒）。默认180秒（3分钟）。
+                    适用于慢速网站或大文件下载。
+            brave_api_key: Brave Search API密钥，用于web_search工具。
+                          如果为None，使用BRAVE_API_KEY环境变量。
+                          如果未提供API密钥，网页搜索将不可用（仅web_fetch可用）。
         """
         self._timeout = timeout
         self._brave_api_key = brave_api_key or os.getenv("BRAVE_API_KEY")
         self._client: httpx.AsyncClient | None = None
 
     async def __aenter__(self) -> list[Tool[Any, Any]]:
-        """Enter async context: create HTTP client and return web tools.
-
+        """进入异步上下文：创建HTTP客户端并返回网页工具。
+        
+        创建配置好的httpx.AsyncClient，启用：
+        - 指定的超时时间
+        - 自动跟随重定向
+        - 连接池化（提高性能）
+        
         Returns:
-            List of Tool objects (web_fetch, and web_search if API key available).
+            Tool对象列表（web_fetch，以及web_search如果API密钥可用）
         """
         self._client = httpx.AsyncClient(
             timeout=self._timeout,
@@ -310,26 +364,29 @@ class WebToolProvider(ToolProvider):
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> None:
-        """Exit async context: close HTTP client."""
+        """退出异步上下文：关闭HTTP客户端。
+        
+        确保所有连接正确关闭，释放系统资源。
+        """
         if self._client:
             await self._client.__aexit__(exc_type, exc_val, exc_tb)
             self._client = None
 
     def get_tools(self) -> list[Tool[Any, Any]]:
-        """Get web tools configured with the managed HTTP client.
-
+        """获取配置了托管HTTP客户端的网页工具。
+        
         Returns:
-            List containing web_fetch tool, and web_search tool if API key is available.
-
+            包含web_fetch工具的列表，以及web_search工具（如果API密钥可用）
+        
         Raises:
-            RuntimeError: If called before entering context.
+            RuntimeError: 如果在进入上下文之前调用
         """
         if self._client is None:
-            raise RuntimeError("WebToolProvider not started. Use 'async with' first.")
+            raise RuntimeError("WebToolProvider未启动。请先使用'async with'。")
 
         tools: list[Tool[Any, Any]] = [_get_fetch_web_page_tool(self._client)]
 
-        # Only add web_search if API key is available
+        # 仅在API密钥可用时添加web_search
         if self._brave_api_key:
             tools.append(_get_websearch_tool(self._brave_api_key, self._client))
 

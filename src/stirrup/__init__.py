@@ -1,25 +1,37 @@
-"""Artificial Analysis' reference agent harness - originally built for running evaluations, simple to use and extend.
+"""Stirrup - Artificial Analysis 的轻量级AI代理框架，最初为评估测试而构建，简单易用且易于扩展。
 
-Example usage:
+这是一个现代化的AI代理开发框架，提供了构建智能代理所需的核心功能：
+- 工具调用和执行
+- 上下文管理和自动摘要
+- 多模态内容支持（图像、视频、音频）
+- 灵活的LLM客户端集成
+- 代码执行环境（本地、Docker、E2B）
+
+使用示例:
     from stirrup import Agent, DEFAULT_TOOLS
     from stirrup.clients.chat_completions_client import ChatCompletionsClient
     from stirrup.tools.mcp import MCPToolProvider
 
-    # Create a client for your LLM provider
+    # 为你的LLM提供商创建客户端
+    # ChatCompletionsClient支持OpenAI兼容的API（OpenAI、OpenRouter、Deepseek等）
     client = ChatCompletionsClient(model="gpt-5")
 
-    # Simple usage with default tools
+    # 使用默认工具的简单用法
+    # 默认工具包括：代码执行、网页获取、网页搜索
     agent = Agent(
         client=client,
         name="assistant",
         system_prompt="You are a helpful assistant.",
     )
 
+    # 使用session上下文管理器执行任务
+    # session会自动处理工具生命周期、日志记录和文件输出
     async with agent.session(output_dir="./output") as session:
         finish_params, history, metadata = await session.run("Your task here")
         print(finish_params.reason)
 
-    # Extend default tools with MCP
+    # 使用MCP扩展默认工具
+    # MCP（Model Context Protocol）允许集成外部工具服务器
     agent = Agent(
         client=client,
         name="assistant",
